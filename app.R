@@ -1,0 +1,986 @@
+#
+# This is a Shiny web application. You can run the application by clicking
+# the 'Run App' button above.
+#
+# Find out more about building applications with Shiny here:
+#
+#    https://shiny.posit.co/
+#
+
+library(shiny)
+library(shinydashboard)
+library(shinycssloaders)
+library(shinyWidgets)
+library(randomForest)
+library(xgboost)
+library(e1071)
+library(nnet)
+library(caret)
+library(ggplot2)
+library(plotly)
+library(SHAPforxgboost)
+library(DT)
+library(rmarkdown)
+library(viridis)
+
+# Define UI
+ui <- dashboardPage(
+  skin = "green",
+  dashboardHeader(
+    title = tags$div(
+      tags$img(src = "https://img.icons8.com/emoji/48/000000/red-apple.png", height = "30px"),
+      "ImMLPro",
+      style = "font-family: 'Arial Black', sans-serif; font-size: 18px;"
+    ),
+    titleWidth = 300
+  ),
+  dashboardSidebar(
+    width = 350,
+    sidebarMenu(
+      id = "tabs",
+      menuItem("📊 Data Exploration", tabName = "eda", icon = icon("search")),
+      menuItem("📈 Model Training", tabName = "training", icon = icon("chart-line")),
+      menuItem("🔧 Hyperparameters", tabName = "params", icon = icon("sliders-h")),
+      menuItem("📊 Results & Analysis", tabName = "results", icon = icon("analytics")),
+      menuItem("ℹ️ About", tabName = "about", icon = icon("info-circle"))
+    ),
+    div(
+      style = "padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 10px; border-radius: 10px; color: white;",
+      h4("📁 Data Upload", style = "color: white; margin-bottom: 15px;"),
+      fileInput("file", 
+                label = NULL,
+                accept = ".csv",
+                buttonLabel = "Browse CSV...",
+                placeholder = "No file selected"),
+      conditionalPanel(
+        condition = "output.fileUploaded",
+        selectInput("target_var", "Select Target Variable", choices = NULL),
+        pickerInput("predictors", "Select Predictors", choices = NULL, multiple = TRUE, 
+                    options = list(`actions-box` = TRUE, `selected-text-format` = "count > 3")),
+        numericInput("split", 
+                     "Train-Test Split (%)", 
+                     value = 80, 
+                     min = 50, 
+                     max = 95,
+                     step = 5),
+        actionBttn("run", 
+                   "🚀 Train All Models",
+                   style = "gradient",
+                   color = "success",
+                   size = "md",
+                   block = TRUE)
+      ),
+      conditionalPanel(
+        condition = "output.modelsRun",
+        div(
+          style = "padding: 15px; margin: 10px; background: #2c3e50; border-radius: 10px;",
+          h4("📥 Downloads", style = "color: white; margin-bottom: 15px;"),
+          downloadBttn("download_csv", 
+                       "Download Predictions",
+                       style = "bordered",
+                       color = "primary",
+                       size = "sm",
+                       block = TRUE),
+          br(),
+          downloadBttn("download_pdf", 
+                       "Download Report",
+                       style = "bordered", 
+                       color = "warning",
+                       size = "sm",
+                       block = TRUE)
+        )
+      )
+    )
+  ),
+  dashboardBody(
+    tags$head(
+      tags$style(HTML("
+        .content-wrapper, .right-side {
+          background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        }
+        .box { border-radius: 10px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        .nav-tabs-custom > .nav-tabs > li.active { border-top-color: #00a65a; }
+        .small-box { border-radius: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }
+        .info-box { border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+      "))
+    ),
+    tabItems(
+      tabItem(tabName = "eda",
+              fluidRow(
+                box(
+                  title = "📊 Data Summary",
+                  status = "info", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  withSpinner(verbatimTextOutput("data_summary"), type = 4, color = "#17a2b8")
+                ),
+                box(
+                  title = "📈 Correlation Plot",
+                  status = "primary", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  withSpinner(plotlyOutput("correlation_plot"), type = 4, color = "#007bff")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "📉 Distribution Plots",
+                  status = "success", solidHeader = TRUE, width = 12, collapsible = TRUE,
+                  selectInput("dist_var", "Select Variable for Distribution", choices = NULL),
+                  withSpinner(plotlyOutput("distribution_plot"), type = 4, color = "#28a745")
+                )
+              )
+      ),
+      tabItem(tabName = "training",
+              fluidRow(
+                conditionalPanel(
+                  condition = "output.modelsRun",
+                  column(3, valueBoxOutput("best_model", width = NULL)),
+                  column(3, valueBoxOutput("best_rmse", width = NULL)),
+                  column(3, valueBoxOutput("best_r2", width = NULL)),
+                  column(3, valueBoxOutput("data_points", width = NULL))
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "🏆 Model Performance Comparison",
+                  status = "success", solidHeader = TRUE, width = 12, collapsible = TRUE,
+                  withSpinner(DTOutput("comparison_table"), type = 4, color = "#28a745")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "📊 Best Model Predictions",
+                  status = "primary", solidHeader = TRUE, width = 8, collapsible = TRUE,
+                  withSpinner(plotlyOutput("pred_plot"), type = 4, color = "#007bff")
+                ),
+                box(
+                  title = "📈 Feature Importance",
+                  status = "warning", solidHeader = TRUE, width = 4, collapsible = TRUE,
+                  withSpinner(plotOutput("importance_plot"), type = 4, color = "#ffc107")
+                )
+              )
+      ),
+      tabItem(tabName = "params",
+              fluidRow(
+                box(
+                  title = "🔧 Random Forest Parameters",
+                  status = "success", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  sliderInput("rf_ntree", "Number of Trees", min = 50, max = 1000, value = 500, step = 50),
+                  sliderInput("rf_mtry", "Variables per Split", min = 1, max = 10, value = 3),
+                  sliderInput("rf_nodesize", "Min Node Size", min = 1, max = 20, value = 5)
+                ),
+                box(
+                  title = "🚀 XGBoost Parameters", 
+                  status = "primary", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  sliderInput("xgb_nrounds", "Number of Rounds", min = 50, max = 500, value = 100, step = 25),
+                  sliderInput("xgb_eta", "Learning Rate", min = 0.01, max = 0.3, value = 0.1, step = 0.01),
+                  sliderInput("xgb_max_depth", "Max Depth", min = 3, max = 15, value = 6)
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "🎯 SVM Parameters",
+                  status = "warning", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  selectInput("svm_kernel", "Kernel Type", 
+                              choices = c("radial", "polynomial", "linear"), selected = "radial"),
+                  sliderInput("svm_cost", "Cost Parameter", min = 0.1, max = 10, value = 1, step = 0.1),
+                  conditionalPanel(
+                    condition = "input.svm_kernel == 'radial'",
+                    sliderInput("svm_gamma", "Gamma", min = 0.001, max = 1, value = 0.1, step = 0.001)
+                  )
+                ),
+                box(
+                  title = "🧠 Neural Network Parameters",
+                  status = "danger", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  textInput("ann_layers", "Hidden Layers (e.g., 10,5 for 2 layers)", value = "5"),
+                  sliderInput("ann_decay", "Weight Decay", min = 0, max = 0.1, value = 0.01, step = 0.001),
+                  sliderInput("ann_maxit", "Max Iterations", min = 100, max = 1000, value = 200, step = 50)
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "⚡ Quick Actions",
+                  width = 12, status = "info", solidHeader = TRUE,
+                  div(
+                    style = "text-align: center; padding: 20px;",
+                    actionBttn("reset_params", "🔄 Reset to Defaults", style = "bordered", color = "warning"),
+                    span(style = "margin: 0 20px;"),
+                    actionBttn("apply_tuning", "✨ Apply & Retrain", style = "gradient", color = "success", size = "lg")
+                  )
+                )
+              )
+      ),
+      tabItem(tabName = "results", 
+              fluidRow(
+                box(
+                  title = "📊 Model Performance Metrics",
+                  status = "primary", solidHeader = TRUE, width = 12, collapsible = TRUE,
+                  withSpinner(plotlyOutput("metrics_comparison"), type = 4, color = "#007bff")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "🎯 Residual Analysis", 
+                  status = "success", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  selectInput("residual_model", "Select Model for Residuals", 
+                              choices = c("Random Forest", "XGBoost", "SVM", "Neural Network")),
+                  withSpinner(plotlyOutput("residual_plot"), type = 4, color = "#28a745")
+                ),
+                box(
+                  title = "📈 Model Comparison Radar",
+                  status = "warning", solidHeader = TRUE, width = 6, collapsible = TRUE,
+                  withSpinner(plotOutput("radar_plot"), type = 4, color = "#ffc107")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "📋 Prediction Results",
+                  status = "info", solidHeader = TRUE, width = 12, collapsible = TRUE,
+                  selectInput("pred_model", "Select Model for Predictions", 
+                              choices = c("Random Forest", "XGBoost", "SVM", "Neural Network")),
+                  withSpinner(DTOutput("predictions_table"), type = 4, color = "#17a2b8")
+                )
+              ),
+              fluidRow(
+                box(
+                  title = "🕸️ Radar Plot Interpretation",
+                  status = "danger", solidHeader = TRUE, width = 12, collapsible = TRUE,
+                  withSpinner(DTOutput("radar_interpretation"), type = 4, color = "#dc3545")
+                )
+              )
+      ),
+      tabItem(tabName = "about", 
+              fluidRow(
+                box(
+                  title = "🎯 About ImMLPro",
+                  status = "info", solidHeader = TRUE, width = 12,
+                  div(
+                    style = "padding: 20px; font-size: 16px; line-height: 1.6;",
+                    h3("🌟 Welcome to ImMLPro : Model Smart and Predict Better", style = "color: #2c3e50; margin-bottom: 20px;"),
+                    p("This advanced machine learning application is designed for predicting continuous target variables using multiple state-of-the-art algorithms. It fits, tunes, and validates a range of ML models—such as Neural Networks, SVM, Random Forest, and XGBoost—providing performance comparisons and insightful diagnostics for accurate and reliable predictions."),
+                    h4("🚀 Key Features:", style = "color: #27ae60; margin-top: 25px;"),
+                    tags$ul(
+                      tags$li("📊 Multiple ML Models: Random Forest, XGBoost, SVM, and Neural Networks"),
+                      tags$li("🔧 Interactive Hyperparameter Tuning with real-time sliders"),
+                      tags$li("📈 Advanced Visualizations with interactive plots"),
+                      tags$li("📱 Responsive Design optimized for all devices"),
+                      tags$li("📥 Export capabilities for predictions and detailed reports"),
+                      tags$li("🎯 Model comparison with comprehensive metrics")
+                    ),
+                    h4("💡 How to Use:", style = "color: #e74c3c; margin-top: 25px;"),
+                    tags$ol(
+                      tags$li("Upload your CSV file with apple yield data"),
+                      tags$li("Select target variable and predictors"),
+                      tags$li("Adjust train-test split ratio as needed"),
+                      tags$li("Fine-tune hyperparameters in the dedicated tab"),
+                      tags$li("Click 'Train All Models' to run the analysis"),
+                      tags$li("Explore results and download predictions/reports")
+                    ),
+                    div(
+                      style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; border-radius: 10px; margin-top: 30px; color: white;",
+                      h4("👨‍💻 Developer Information", style = "color: white; margin-bottom: 15px;"),
+                      p(strong("Developed by:"), " M.Iqbal Jeelani, SKUAST-Kashmir (India) and Sheikh Mansoor , Jeju National University (South Korea)"),
+                      p(strong("Contact:"), " jeelani.miqbal@gmail.com"),
+                      p(strong("Version:"), " 2.1.0 (Enhanced Edition)"),
+                      p(strong("Last Updated:"), " June 2025"),
+                      div(
+                        style = "text-align: center; margin-top: 20px;",
+                        actionBttn("contact_dev", "📧 Contact Developer", style = "bordered", color = "primary", size = "sm"),
+                        span(style = "margin: 0 10px;"),
+                        actionBttn("youtube_channel", "📺 View on YouTube", style = "bordered", color = "success", size = "sm")
+                      )
+                    ),
+                    div(
+                      style = "text-align: center; margin-top: 30px; padding: 15px; background: #ecf0f1; border-radius: 8px;",
+                      p("🌱 Empowering Agriculture with AI & Data Science", style = "font-style: italic; color: #7f8c8d; margin: 0;")
+                    )
+                  )
+                )
+              )
+      )
+    )
+  )
+)
+
+# Define Server
+server <- function(input, output, session) {
+  # Reactive values
+  dataInput <- reactive({
+    req(input$file)
+    df <- read.csv(input$file$datapath)
+    if (ncol(df) < 1) {
+      showNotification("Uploaded CSV is empty or invalid!", type = "error")
+      return(NULL)
+    }
+    df[] <- lapply(df, function(x) if (is.factor(x)) as.character(x) else x)
+    return(df)
+  })
+  
+  observe({
+    req(dataInput())
+    df <- dataInput()
+    updateSelectInput(session, "target_var", choices = colnames(df), selected = colnames(df)[1])
+    updatePickerInput(session, "predictors", choices = colnames(df), selected = colnames(df)[-1])
+    updateSelectInput(session, "dist_var", choices = colnames(df), selected = colnames(df)[1])
+  })
+  
+  results <- reactiveValues()
+  
+  output$fileUploaded <- reactive({
+    return(!is.null(input$file))
+  })
+  outputOptions(output, 'fileUploaded', suspendWhenHidden = FALSE)
+  
+  output$modelsRun <- reactive({
+    return(!is.null(results$metrics))
+  })
+  outputOptions(output, 'modelsRun', suspendWhenHidden = FALSE)
+  
+  output$data_summary <- renderPrint({
+    req(dataInput())
+    summary(dataInput())
+  })
+  
+  output$correlation_plot <- renderPlotly({
+    req(dataInput())
+    df <- dataInput()
+    numeric_cols <- sapply(df, is.numeric)
+    if (sum(numeric_cols) < 2) {
+      showNotification("Not enough numeric columns for correlation plot!", type = "error")
+      return(NULL)
+    }
+    corr <- cor(df[, numeric_cols], use = "complete.obs")
+    p <- ggplot(data = reshape2::melt(corr), aes(x = Var1, y = Var2, fill = value)) +
+      geom_tile() +
+      scale_fill_viridis(option = "C") +
+      labs(title = "Correlation Matrix", x = "", y = "") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    ggplotly(p)
+  })
+  
+  output$distribution_plot <- renderPlotly({
+    req(dataInput(), input$dist_var)
+    df <- dataInput()
+    if (!input$dist_var %in% colnames(df)) return(NULL)
+    p <- ggplot(df, aes_string(x = input$dist_var)) +
+      geom_histogram(fill = "#1abc9c", color = "white", bins = 30) +
+      labs(title = paste("Distribution of", input$dist_var), x = input$dist_var, y = "Count") +
+      theme_minimal()
+    ggplotly(p)
+  })
+  
+  parseAnnLayers <- function(input_str) {
+    tryCatch({
+      layers <- as.numeric(unlist(strsplit(input_str, ",")))
+      if (any(is.na(layers)) || any(layers <= 0)) {
+        showNotification("Invalid hidden layers input. Please enter positive numbers (e.g., '10,5').", type = "error")
+        return(NULL)
+      }
+      layers
+    }, error = function(e) {
+      showNotification("Invalid hidden layers input. Please enter comma-separated numbers (e.g., '10,5').", type = "error")
+      return(NULL)
+    })
+  }
+  
+  runModels <- function() {
+    req(dataInput(), input$target_var, input$predictors)
+    df <- dataInput()
+    
+    if (!(input$target_var %in% colnames(df))) {
+      showNotification("Selected target variable not found in data!", type = "error")
+      return(NULL)
+    }
+    if (length(input$predictors) == 0 || !all(input$predictors %in% colnames(df))) {
+      showNotification("Invalid or no predictors selected!", type = "error")
+      return(NULL)
+    }
+    if (input$target_var %in% input$predictors) {
+      showNotification("Target variable cannot be a predictor!", type = "error")
+      return(NULL)
+    }
+    
+    df <- df[, c(input$target_var, input$predictors), drop = FALSE]
+    df[[input$target_var]] <- as.numeric(df[[input$target_var]])
+    if (any(is.na(df[[input$target_var]]))) {
+      showNotification("Target variable contains non-numeric or missing values!", type = "error")
+      return(NULL)
+    }
+    
+    withProgress(message = 'Training Models...', value = 0, {
+      set.seed(123)
+      # Single train-test split
+      train_idx <- sample(1:nrow(df), size = floor(input$split / 100 * nrow(df)))
+      train <- df[train_idx, ]
+      test <- df[-train_idx, ]
+      
+      X_train <- train[, input$predictors, drop = FALSE]
+      y_train <- train[[input$target_var]]
+      X_test <- test[, input$predictors, drop = FALSE]
+      y_test <- test[[input$target_var]]
+      
+      if (nrow(X_train) == 0 || nrow(X_test) == 0) {
+        showNotification("Train or test set is empty!", type = "error")
+        return(NULL)
+      }
+      
+      metrics <- data.frame(Model = character(), RMSE = numeric(), R2 = numeric(), MAE = numeric(), stringsAsFactors = FALSE)
+      predictions <- list(RF = list(), XGB = list(), SVM = list(), ANN = list())
+      
+      incProgress(0.2, detail = "Training Random Forest...")
+      # Random Forest
+      rf_formula <- as.formula(paste(input$target_var, "~ ."))
+      rf <- randomForest(rf_formula, data = train, 
+                         ntree = input$rf_ntree,
+                         mtry = min(input$rf_mtry, length(input$predictors)),
+                         nodesize = input$rf_nodesize)
+      rf_pred <- predict(rf, test)
+      rf_rmse <- sqrt(mean((rf_pred - y_test)^2))
+      rf_r2 <- 1 - sum((rf_pred - y_test)^2) / sum((y_test - mean(y_test))^2)
+      rf_mae <- mean(abs(rf_pred - y_test))
+      metrics <- rbind(metrics, data.frame(Model = "Random Forest", RMSE = rf_rmse, R2 = rf_r2, MAE = rf_mae))
+      predictions$RF <- list(pred = rf_pred, actual = y_test)
+      
+      incProgress(0.4, detail = "Training XGBoost...")
+      # XGBoost
+      dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = y_train)
+      dtest <- xgb.DMatrix(data = as.matrix(X_test), label = y_test)
+      xgb_model <- xgboost(data = dtrain, 
+                           nrounds = input$xgb_nrounds,
+                           eta = input$xgb_eta,
+                           max_depth = input$xgb_max_depth,
+                           objective = "reg:squarederror", 
+                           verbose = 0)
+      xgb_pred <- predict(xgb_model, dtest)
+      xgb_rmse <- sqrt(mean((xgb_pred - y_test)^2))
+      xgb_r2 <- 1 - sum((xgb_pred - y_test)^2) / sum((y_test - mean(y_test))^2)
+      xgb_mae <- mean(abs(xgb_pred - y_test))
+      metrics <- rbind(metrics, data.frame(Model = "XGBoost", RMSE = xgb_rmse, R2 = xgb_r2, MAE = xgb_mae))
+      predictions$XGB <- list(pred = xgb_pred, actual = y_test)
+      
+      incProgress(0.6, detail = "Training SVM...")
+      # SVM
+      svm_params <- list(kernel = input$svm_kernel, cost = input$svm_cost)
+      if (input$svm_kernel == "radial") {
+        svm_params$gamma <- input$svm_gamma
+      }
+      svm_model <- do.call(svm, c(list(rf_formula, data = train), svm_params))
+      svm_pred <- predict(svm_model, test)
+      svm_rmse <- sqrt(mean((svm_pred - y_test)^2))
+      svm_r2 <- 1 - sum((svm_pred - y_test)^2) / sum((y_test - mean(y_test))^2)
+      svm_mae <- mean(abs(svm_pred - y_test))
+      metrics <- rbind(metrics, data.frame(Model = "SVM", RMSE = svm_rmse, R2 = svm_r2, MAE = svm_mae))
+      predictions$SVM <- list(pred = svm_pred, actual = y_test)
+      
+      incProgress(0.8, detail = "Training Neural Network...")
+      # Neural Network
+      ann_layers <- parseAnnLayers(input$ann_layers)
+      if (is.null(ann_layers)) return(NULL)
+      
+      maxs <- apply(df, 2, max)
+      mins <- apply(df, 2, min)
+      scaled <- as.data.frame(scale(df, center = mins, scale = maxs - mins))
+      train_scaled <- scaled[train_idx, ]
+      test_scaled <- scaled[-train_idx, ]
+      ann <- nnet(rf_formula, data = train_scaled, 
+                  size = ann_layers[1], 
+                  decay = input$ann_decay,
+                  maxit = input$ann_maxit,
+                  linout = TRUE, 
+                  trace = FALSE)
+      ann_pred <- predict(ann, test_scaled)
+      ann_pred <- ann_pred * (max(df[[input$target_var]]) - min(df[[input$target_var]])) + min(df[[input$target_var]])
+      ann_rmse <- sqrt(mean((ann_pred - y_test)^2))
+      ann_r2 <- 1 - sum((ann_pred - y_test)^2) / sum((y_test - mean(y_test))^2)
+      ann_mae <- mean(abs(ann_pred - y_test))
+      metrics <- rbind(metrics, data.frame(Model = "Neural Network", RMSE = ann_rmse, R2 = ann_r2, MAE = ann_mae))
+      predictions$ANN <- list(pred = ann_pred, actual = y_test)
+      
+      incProgress(1.0, detail = "Finalizing...")
+      # Store results
+      results$metrics <- metrics
+      results$predictions <- data.frame(
+        Actual = y_test,
+        RF = predictions$RF$pred,
+        XGB = predictions$XGB$pred,
+        SVM = predictions$SVM$pred,
+        ANN = predictions$ANN$pred
+      )
+      results$rf_model <- rf
+      results$test_data <- test
+      results$y_test <- y_test
+    })
+  }
+  
+  observeEvent(input$run, {
+    if (is.null(dataInput())) {
+      showNotification("Please upload a CSV file first!", type = "error")
+      return(NULL)
+    }
+    runModels()
+    showNotification("All models trained successfully!", type = "message")
+  })
+  
+  observeEvent(input$apply_tuning, {
+    if (is.null(dataInput())) {
+      showNotification("Please upload a CSV file first!", type = "error")
+      return(NULL)
+    }
+    runModels()
+    showNotification("Models retrained with new parameters!", type = "message")
+  })
+  
+  output$best_model <- renderValueBox({
+    req(results$metrics)
+    best_idx <- which.min(results$metrics$RMSE)
+    valueBox(
+      value = results$metrics$Model[best_idx],
+      subtitle = "Best Performing Model",
+      icon = icon("trophy"),
+      color = "green"
+    )
+  })
+  
+  output$best_rmse <- renderValueBox({
+    req(results$metrics)
+    best_rmse <- min(results$metrics$RMSE)
+    valueBox(
+      value = round(best_rmse, 3),
+      subtitle = "Lowest RMSE",
+      icon = icon("target"),
+      color = "blue"
+    )
+  })
+  
+  output$best_r2 <- renderValueBox({
+    req(results$metrics)
+    best_r2 <- max(results$metrics$R2)
+    valueBox(
+      value = paste0(round(best_r2 * 100, 1), "%"),
+      subtitle = "Highest R²",
+      icon = icon("chart-line"),
+      color = "purple"
+    )
+  })
+  
+  output$data_points <- renderValueBox({
+    req(dataInput())
+    valueBox(
+      value = nrow(dataInput()),
+      subtitle = "Total Data Points",
+      icon = icon("database"),
+      color = "orange"
+    )
+  })
+  
+  output$comparison_table <- renderDT({
+    req(results$metrics)
+    metrics_display <- results$metrics
+    metrics_display$RMSE <- round(metrics_display$RMSE, 4)
+    metrics_display$R2 <- round(metrics_display$R2, 4)
+    metrics_display$MAE <- round(metrics_display$MAE, 4)
+    
+    datatable(metrics_display, 
+              options = list(
+                pageLength = 10,
+                dom = 'Bfrtip',
+                buttons = c('copy', 'csv', 'excel'),
+                scrollX = TRUE,
+                columnDefs = list(list(
+                  targets = c(1, 2, 3),
+                  className = 'dt-center'
+                ))
+              ),
+              rownames = FALSE,
+              class = 'cell-border stripe') %>%
+      formatStyle(columns = "Model", fontWeight = "bold") %>%
+      formatStyle(columns = "RMSE", 
+                  backgroundColor = styleInterval(quantile(results$metrics$RMSE, c(0.5)), c("lightgreen", "lightcoral"))) %>%
+      formatStyle(columns = "R2",
+                  backgroundColor = styleInterval(quantile(results$metrics$R2, c(0.5)), c("lightcoral", "lightgreen")))
+  })
+  
+  output$pred_plot <- renderPlotly({
+    req(results$metrics, results$predictions, input$pred_model)
+    
+    model_col <- switch(input$pred_model,
+                        "Random Forest" = "RF",
+                        "XGBoost" = "XGB", 
+                        "SVM" = "SVM",
+                        "Neural Network" = "ANN")
+    
+    best_pred <- results$predictions[[model_col]]
+    
+    p <- ggplot(data.frame(Actual = results$predictions$Actual, Predicted = best_pred), 
+                aes(x = Actual, y = Predicted)) +
+      geom_point(aes(text = paste("Actual:", round(Actual, 2), "<br>Predicted:", round(Predicted, 2))),
+                 color = "#6b48ff", size = 3, alpha = 0.7) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#ff6f61", size = 1) +
+      labs(title = paste("🎯", input$pred_model, "- Predictions vs Actual"),
+           x = "Actual ", 
+           y = "Predicted ") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 12, face = "bold"),
+        panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = "white", color = NA)
+      )
+    
+    ggplotly(p, tooltip = "text") %>%
+      config(displayModeBar = TRUE, 
+             modeBarButtonsToRemove = list('pan2d', 'lasso2d', 'select2d', 'autoScale2d', 'hoverClosestCartesian', 'hoverCompareCartesian'))
+  })
+  
+  output$importance_plot <- renderPlot({
+    req(results$rf_model)
+    
+    importance_data <- importance(results$rf_model)
+    importance_df <- data.frame(
+      Variable = rownames(importance_data),
+      Importance = importance_data[, 1]
+    )
+    importance_df <- importance_df[order(importance_df$Importance, decreasing = TRUE), ]
+    
+    ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+      geom_col(fill = "#1abc9c", alpha = 0.8) +
+      coord_flip() +
+      labs(title = "📊 Feature Importance (Random Forest)",
+           x = "Variables",
+           y = "Importance") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        axis.title = element_text(size = 10, face = "bold"),
+        axis.text = element_text(size = 9)
+      )
+  })
+  
+  output$metrics_comparison <- renderPlotly({
+    req(results$metrics)
+    
+    metrics_long <- reshape2::melt(results$metrics, id.vars = "Model", variable.name = "Metric", value.name = "Value")
+    
+    custom_colors <- c("Random Forest" = "#6b48ff", "XGBoost" = "#ff6f61", "SVM" = "#1abc9c", "Neural Network" = "#f1c40f")
+    
+    p <- ggplot(metrics_long, aes(x = Model, y = Value, fill = Model)) +
+      geom_col(alpha = 0.8) +
+      facet_wrap(~Metric, scales = "free_y") +
+      scale_fill_manual(values = custom_colors) +
+      labs(title = "📊 Model Performance Comparison",
+           x = "Models", y = "Metric Value") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        strip.text = element_text(size = 12, face = "bold")
+      )
+    
+    ggplotly(p) %>%
+      config(displayModeBar = TRUE)
+  })
+  
+  output$residual_plot <- renderPlotly({
+    req(results$metrics, results$predictions, input$residual_model)
+    
+    model_col <- switch(input$residual_model,
+                        "Random Forest" = "RF",
+                        "XGBoost" = "XGB",
+                        "SVM" = "SVM", 
+                        "Neural Network" = "ANN")
+    
+    residuals <- results$predictions$Actual - results$predictions[[model_col]]
+    
+    p <- ggplot(data.frame(Fitted = results$predictions[[model_col]], Residuals = residuals),
+                aes(x = Fitted, y = Residuals)) +
+      geom_point(color = "#ff6f61", alpha = 0.7) +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "#2c3e50") +
+      geom_smooth(method = "loess", se = TRUE, color = "#6b48ff") +
+      labs(title = paste("🎯 Residual Analysis -", input$residual_model),
+           x = "Fitted Values", y = "Residuals") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5)
+      )
+    
+    ggplotly(p) %>%
+      config(displayModeBar = TRUE)
+  })
+  
+  output$radar_plot <- renderPlot({
+    req(results$metrics)
+    
+    metrics_norm <- results$metrics
+    metrics_norm$RMSE_norm <- 1 - (metrics_norm$RMSE - min(metrics_norm$RMSE)) / (max(metrics_norm$RMSE) - min(metrics_norm$RMSE))
+    metrics_norm$R2_norm <- (metrics_norm$R2 - min(metrics_norm$R2)) / (max(metrics_norm$R2) - min(metrics_norm$R2))
+    metrics_norm$MAE_norm <- 1 - (metrics_norm$MAE - min(metrics_norm$MAE)) / (max(metrics_norm$MAE) - min(metrics_norm$MAE))
+    
+    radar_data <- data.frame(
+      Model = metrics_norm$Model,
+      RMSE = metrics_norm$RMSE_norm,
+      R2 = metrics_norm$R2_norm,
+      MAE = metrics_norm$MAE_norm
+    )
+    
+    radar_long <- reshape2::melt(radar_data, id.vars = "Model", variable.name = "Metric", value.name = "Score")
+    
+    custom_colors <- c("Random Forest" = "#6b48ff", "XGBoost" = "#ff6f61", "SVM" = "#1abc9c", "Neural Network" = "#f1c40f")
+    
+    ggplot(radar_long, aes(x = Metric, y = Score, group = Model, color = Model)) +
+      geom_polygon(aes(fill = Model), alpha = 0.2) +
+      geom_point(size = 3) +
+      geom_line(size = 1.2) +
+      coord_polar() +
+      scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+      scale_color_manual(values = custom_colors) +
+      scale_fill_manual(values = custom_colors) +
+      labs(title = "🕸️ Model Performance Radar",
+           y = "Normalized Score") +
+      theme_minimal() +
+      theme(
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+        axis.text.x = element_text(size = 10, face = "bold"),
+        legend.position = "bottom",
+        panel.grid.major = element_line(color = "grey80"),
+        panel.grid.minor = element_blank()
+      )
+  })
+  
+  output$predictions_table <- renderDT({
+    req(results$predictions, input$pred_model)
+    model_col <- switch(input$pred_model,
+                        "Random Forest" = "RF",
+                        "XGBoost" = "XGB",
+                        "SVM" = "SVM",
+                        "Neural Network" = "ANN")
+    predictions_display <- data.frame(
+      Actual = results$predictions$Actual,
+      Predicted = results$predictions[[model_col]]
+    )
+    predictions_display[] <- lapply(predictions_display, function(x) round(x, 4))
+    
+    datatable(predictions_display,
+              options = list(
+                pageLength = 10,
+                dom = 'Bfrtip',
+                buttons = c('copy', 'csv', 'excel'),
+                scrollX = TRUE,
+                columnDefs = list(list(
+                  targets = '_all',
+                  className = 'dt-center'
+                ))
+              ),
+              rownames = FALSE,
+              class = 'cell-border stripe') %>%
+      formatStyle(columns = colnames(predictions_display), fontSize = '12px')
+  })
+  
+  output$radar_interpretation <- renderDT({
+    req(results$metrics)
+    
+    metrics <- results$metrics
+    metrics$MAE <- round(metrics$MAE, 3)
+    metrics$RMSE <- round(metrics$RMSE, 3)
+    metrics$R2 <- round(metrics$R2, 3)
+    
+    metrics$Rank <- rank(metrics$RMSE, ties.method = "min")
+    
+    model_colors <- c("Random Forest" = "(Purple)", "XGBoost" = "(Red)", "SVM" = "(Green)", "Neural Network" = "(Yellow)")
+    metrics$Model_Display <- paste0(metrics$Model, " ", model_colors[metrics$Model])
+    
+    metrics$Remarks <- sapply(1:nrow(metrics), function(i) {
+      if (metrics$Rank[i] == 1) {
+        paste0("🥇 Best overall: balanced, consistently high across all metrics.")
+      } else if (metrics$Rank[i] == 2) {
+        paste0("🥈 Excellent performer, slightly behind the best model.")
+      } else if (metrics$Rank[i] == max(metrics$Rank)) {
+        paste0("❌ Worst performance: very low across all metrics — possibly due to misconfiguration or data issues.")
+      } else {
+        paste0("⚠️ Moderate performance, noticeably weaker than top models.")
+      }
+    })
+    
+    interpretation <- metrics[, c("Model_Display", "MAE", "RMSE", "R2", "Remarks")]
+    colnames(interpretation) <- c("Model", "MAE", "RMSE", "R²", "Remarks")
+    
+    datatable(interpretation,
+              options = list(
+                pageLength = 4,
+                dom = 't',
+                scrollX = TRUE,
+                columnDefs = list(list(
+                  targets = '_all',
+                  className = 'dt-center'
+                ))
+              ),
+              rownames = FALSE,
+              class = 'cell-border stripe') %>%
+      formatStyle(columns = "Model", fontWeight = "bold") %>%
+      formatStyle(columns = "Remarks", width = '400px')
+  })
+  
+  output$download_csv <- downloadHandler(
+    filename = function() {
+      paste0("apple_yield_predictions_", Sys.Date(), ".csv")
+    },
+    content = function(file) {
+      req(results$predictions)
+      write.csv(results$predictions, file, row.names = FALSE)
+    }
+  )
+  
+  output$download_pdf <- downloadHandler(
+    filename = function() {
+      paste0("apple_yield_report_", Sys.Date(), ".pdf")
+    },
+    content = function(file) {
+      req(results$metrics, results$predictions)
+      
+      temp_rmd <- tempfile(fileext = ".Rmd")
+      
+      report_content <- paste0('
+---
+title: "🎯 ImMLPro Report"
+date: "', Sys.Date(), '"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+geometry: margin=1in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.width=6, fig.height=4)
+library(ggplot2)
+library(plotly)
+library(knitr)
+library(viridis)
+library(reshape2)
+metrics_display <- params$metrics
+metrics_display$RMSE <- round(metrics_display$RMSE, 4)
+metrics_display$R2 <- round(metrics_display$R2, 4)
+metrics_display$MAE <- round(metrics_display$MAE, 4)
+predictions <- params$predictions
+custom_colors <- c("Random Forest" = "#6b48ff", "XGBoost" = "#ff6f61", "SVM" = "#1abc9c", "Neural Network" = "#f1c40f")
+kable(metrics_display, caption = "Model Performance Metrics")
+metrics_long <- reshape2::melt(params$metrics, id.vars = "Model", variable.name = "Metric", value.name = "Value")
+ggplot(metrics_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_col(alpha = 0.8) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_fill_manual(values = custom_colors) +
+  labs(title = "Model Performance Comparison",
+       x = "Models", y = "Metric Value") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none",
+    strip.text = element_text(size = 12, face = "bold")
+  )
+best_model <- metrics_display[which.min(metrics_display$RMSE), "Model"]
+model_col <- switch(best_model,
+                    "Random Forest" = "RF",
+                    "XGBoost" = "XGB",
+                    "SVM" = "SVM",
+                    "Neural Network" = "ANN")
+ggplot(data.frame(Actual = predictions$Actual, Predicted = predictions[[model_col]]), 
+       aes(x = Actual, y = Predicted)) +
+  geom_point(color = "#6b48ff", size = 3, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#ff6f61", size = 1) +
+  labs(title = paste("Predictions vs Actual -", best_model),
+       x = "Actual Yield", y = "Predicted Yield") +
+  theme_minimal()
+metrics_norm <- metrics_display
+metrics_norm$RMSE_norm <- 1 - (metrics_norm$RMSE - min(metrics_norm$RMSE)) / (max(metrics_norm$RMSE) - min(metrics_norm$RMSE))
+metrics_norm$R2_norm <- (metrics_norm$R2 - min(metrics_norm$R2)) / (max(metrics_norm$R2) - min(metrics_norm$R2))
+metrics_norm$MAE_norm <- 1 - (metrics_norm$MAE - min(metrics_norm$MAE)) / (max(metrics_norm$MAE) - min(metrics_norm$MAE))
+radar_data <- data.frame(Model = metrics_norm$Model, RMSE = metrics_norm$RMSE_norm, R2 = metrics_norm$R2_norm, MAE = metrics_norm$MAE_norm)
+radar_long <- reshape2::melt(radar_data, id.vars = "Model", variable.name = "Metric", value.name = "Score")
+ggplot(radar_long, aes(x = Metric, y = Score, group = Model, color = Model)) +
+  geom_polygon(aes(fill = Model), alpha = 0.2) +
+  geom_point(size = 3) +
+  geom_line(size = 1.2) +
+  coord_polar() +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_color_manual(values = custom_colors) +
+  scale_fill_manual(values = custom_colors) +
+  labs(title = "Model Performance Radar", y = "Normalized Score") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    axis.text.x = element_text(size = 10, face = "bold"),
+    legend.position = "bottom"
+  )
+interpretation <- params$metrics
+interpretation$MAE <- round(interpretation$MAE, 3)
+interpretation$RMSE <- round(interpretation$RMSE, 3)
+interpretation$R2 <- round(interpretation$R2, 3)
+interpretation$Rank <- rank(interpretation$RMSE, ties.method = "min")
+model_colors <- c("Random Forest" = "(Purple)", "XGBoost" = "(Red)", "SVM" = "(Green)", "Neural Network" = "(Yellow)")
+interpretation$Model <- paste0(interpretation$Model, " ", model_colors[interpretation$Model])
+interpretation$Remarks <- sapply(1:nrow(interpretation), function(i) {
+  if (interpretation$Rank[i] == 1) {
+    "🥇 Best overall: balanced, consistently high across all metrics."
+  } else if (interpretation$Rank[i] == 2) {
+    "🥈 Excellent performer, slightly behind the best model."
+  } else if (interpretation$Rank[i] == max(interpretation$Rank)) {
+    "❌ Worst performance: very low across all metrics — possibly due to misconfiguration or data issues."
+  } else {
+    "⚠️ Moderate performance, noticeably weaker than top models."
+  }
+})
+kable(interpretation[, c("Model", "MAE", "RMSE", "R2", "Remarks")], caption = "Radar Plot Interpretation")
+Report generated by ImMLPro v2.1
+Developed by M.Iqbal Jeelani, SKUAST-Kashmir
+Contact: jeelani.miqbal@gmail.com
+')
+      
+      writeLines(report_content, temp_rmd)
+      
+      rmarkdown::render(temp_rmd,
+                        output_file = file,
+                        params = list(metrics = results$metrics, predictions = results$predictions),
+                        envir = new.env(parent = globalenv()))
+    }
+  )
+  
+  observeEvent(input$contact_dev, {
+    showModal(modalDialog(
+      title = "📧 Contact Developer",
+      div(
+        style = "text-align: center; padding: 20px;",
+        h4("Get in Touch!", style = "color: #2c3e50; margin-bottom: 20px;"),
+        p("For questions, suggestions, or collaboration opportunities:"),
+        br(),
+        tags$a(href = "jeelani.miqbal@gmail.com",
+               style = "font-size: 18px; color: #3498db; text-decoration: none;",
+               "📧 jeelani.miqbal@gmail.com"),
+        br(), br(),
+        p("We'd love to hear from you!", style = "font-style: italic; color: #7f8c8d;")
+      ),
+      easyClose = TRUE,
+      footer = modalButton("Close")
+    ))
+  })
+  
+  observeEvent(input$youtube_channel, {
+    showModal(modalDialog(
+      title = "📺 YouTube Channel",
+      div(
+        style = "text-align: center; padding: 20px;",
+        h4("Visit Our Channel", style = "color: #2c3e50; margin-bottom: 20px;"),
+        p("Check out our YouTube channel for tutorials and updates:"),
+        br(),
+        tags$a(href = "https://www.youtube.com/@Iqbalstat",
+               target = "_blank",
+               style = "font-size: 18px; color: #27ae60; text-decoration: none;",
+               "🔗 Visit YouTube Channel"),
+        br(), br(),
+        p("📺 Subscribe for the latest content!", style = "font-style: italic; color: #7f8c8d;"),
+        p("🎥 Watch our latest videos!", style = "font-style: italic; color: #7f8c8d;")
+      ),
+      easyClose = TRUE,
+      footer = modalButton("Close")
+    ))
+  })
+}
+
+shinyApp(ui = ui, server = server)
